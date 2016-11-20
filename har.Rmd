@@ -1,0 +1,174 @@
+---
+title: "Qualitative Assessment of Weight Lifting Activity"
+output: 
+  html_document: 
+    highlight: tango
+    theme: journal
+    toc: yes
+---
+
+# 1. Background
+This project is being done as a part of [Coursera Data Science Specialization from Johns Hopkins](https://www.coursera.org/specializations/jhu-data-science). It will be a quick walk through of my own machine learning work flow which involves reading the data, exploring and cleaning the data, features transformation, model training, model selection and tuning and finally testing on out of sample data. The entire project is done using R programming language.
+
+# 2. Overview
+For this post I will be using the dataset from Human Activity Recognition research. More information about this research and the datasets can be found from this [website](http://groupware.les.inf.puc-rio.br/har). The dataset basically consists of about nineteen thousand observation from six different people while they perform weight lifting using dumbbells correctly and incorrectly. For each record there is a label from "A" to "E" which classify how correctly the action is performed, "A" being most correct and "E" being the least. This classification or labeling is done by an expert trainer while the subjects were performing the exercise. Each of the subjects were equipped with 5 sensors at various parts of the body and the dumbbell. A total of about 160 features are collected for each of the records. Using these features, we will train a machine learning model to accurately classify the activity in to one of the labels.
+A practical application of this solution would be to notify the users when they are incorrectly performing a certain exercise despite the absence of a trainer.
+
+# 3. Reading and Understanding the Training Dataset
+The training dataset used for this post is actually a subset of the overall dataset (to lower the burden on my resources). 
+
+## a) Exploring the size and structure of the dataset.
+Lets get started by reading the data. Using the `dim` function we can see the size of the dataset.
+```{r read, echo=TRUE, cache = TRUE}
+train <- read.csv("pml-training.csv", header = TRUE, stringsAsFactors = FALSE)
+dim(train) 
+```
+## b) Exploring the proportion of labels in the dataset
+The label is defined in the last columns with the name `classe`. We can quickly look at the proportion of labels to see if there is any imbalance in the dataset toward any of the labels.
+```{r check1, echo=TRUE, cache = TRUE}
+round(prop.table(table(train$classe)) * 100, 2)
+```
+
+All the lables are equally represented.
+
+# 4. Cleaning and Preparing the Training Data for Machine Learning
+
+## a) Checking for the number of complete case
+Without actually looking at the data we can figure out if there are any missing values in the dataset using the `complete.cases` function. This will return a boolean value for each of the rows in the dataset. `TRUE` if there is no `NA`, `FALSE` if there is at least 1 `NA` in the row. Running a `sum` on `complete.cases(train)` we can observe that there are just `r round(100*sum(complete.cases(train)) / dim(train)[1],2)`% of cases which are complete!
+This will prompt us to look deeper in to each of the columns and identify which of the features have most missing values. If majority proportion is missing, we can remove the column from the dataset. We will use `sapply` function to run a check on all columns to identify percentage of missing values and store the values in `missing1`.
+```{r missing1, echo=TRUE, cache = TRUE}
+missing1 <- sapply(train, function(x) { round(sum(is.na(x)) / dim(train)[1],2)})
+range(missing1)
+unique(missing1)
+```
+From the above output, we can observe that either `0%` or `98%` values are missing in the columns. In other words, the columns either have no values missing or `98%` values missing.
+
+## b) Pruning down the columns with missing values
+We will prune all the columns which have `98%` missing values and retain only those columns that have all cases available. We use the below code for that.
+```{r missing1.1, echo=TRUE, cache = TRUE}
+missing_index1 <- missing1 == 0.98
+train1 <- train[, !(colnames(train) %in% colnames(train)[missing_index1])]
+dim(train1)
+```
+As we can see we were able to reduce the number of columns from 160 to 93. But when we look at the structure of the dataset using `str`, we see that some of the numeric columns are showing as `chr` type instead of `numeric`.
+
+## c) Converting columns to appropriate variable types
+Now we will convert all character columns to `numeric` using `as.numeric` function. Below is the code for that.
+```{r conv, echo=TRUE, message=FALSE, warning=FALSE, cache = TRUE}
+sum(sapply(train1, class) == "character") # 37 are character variables and remaining 56 are numeric variables
+
+# Checking which of the variables are character type
+names(train1)[sapply(train1, class) == "character"]
+
+# Converting classe and new_window to factors
+train1$classe <- as.factor(train1$classe)
+train1$new_window <- as.factor(train1$new_window)
+
+# user_name and cvtd_timestamp will remain as character. Rest of the features will be converted to numeric
+train1[, names(train1)[sapply(train1, class) == "character"][ - c(1, 2)]] <- apply(train1[, names(train1)[sapply(train1, class) == "character"][ - c(1, 2)]], 2, as.numeric)
+```
+
+Converting character to numeric causes R to coerce `NA` (i.e. missing values) in to field where the character is blank. So we have to repeat steps in 4.a and 4.b to check proportion of missing cases in each of the columns and prune those with majority of missing cases. The below code will help us do that.
+
+```{r missing2, echo=TRUE, message=FALSE, warning=FALSE, cache = TRUE}
+missing2 <- sapply(train1, function(x) { round(sum(is.na(x)) / dim(train1)[1], 2) })
+#summary(missing2); unique(missing2)
+# Again quite a few columns seem to have >98% NA values. We will prune such variables as well
+missing_index2 <- missing2 >= 0.98
+train2 <- train1[, !(colnames(train1) %in% colnames(train1)[missing_index2])]
+#str(train2)
+#sum(complete.cases(train2)) / dim(train2)[1] # 100% complete cases
+dim(train2)
+```
+
+Our final training dataset looks in a good shape with 60 variables down from 160 when we started of. Also, out dataset does not have any missing value and all columns in relevant data formats. However, 60 variables is still quite a lot and can burden the memory resources or increase the computation time. Let us see if any of these variables are highly correlated. Having highly correlated variables will increase the variance of our prediction model.
+
+```{r cor, echo=TRUE, message=FALSE, warning=FALSE, cache = TRUE}
+M <- abs(cor(train2[,7:59]))
+diag(M) <- 0 # Setting diagonal elements to 0 
+dim(which(M > 0.9, arr.ind = TRUE))[1]
+```
+
+As we can see there are 22 combinations of features with correlation >90%. So we have a great opportunity here to reduce the number of columns while keeping the overall variance in our data intact.
+
+# 5. Feature Transformation using PCA
+As we saw from the closing comments in the previous section, we can reduce the total number of columns in the our dataset further using Principle Components Analysis transformation. We can use `prcomp` function in R to identify how many principle component contribute to 95% of the overall variance in the data. But before we apply the PCA transformation it is advisable to normalize the data i.e, center and scale the columns so that every column has a mean of `0` and a standard deviation of `1`. We will use the `preProcess` function in R's `caret` package
+
+```{r cs, echo=TRUE, message=FALSE, warning=FALSE, cache = TRUE}
+library(caret)
+preObj <- preProcess(train2[,7:59], method = c("center","scale"))
+train2[,7:59] <- predict(preObj, train2[,7:59])
+```
+
+Now we can apply PCA transformation.
+
+```{r prc, echo=TRUE, message=FALSE, warning=FALSE, cache=TRUE}
+princomp <- prcomp(train2[,7:59])
+plot(princomp, type = "l") # Plotting components vs % variance explained
+prsum <- summary(princomp)
+which(prsum$importance[3,]>0.95)[1]
+```
+
+So just 26 variables explain 95% of variation in the data. This is a great news for us! We can now considerably reduce the size of our dataset from 60 variable to 26 variable while keeping 95% information in the data. We will do this using `preProcess` function again.
+
+```{r prc1, echo=TRUE, message=FALSE, warning=FALSE, cache=TRUE}
+prep <- preProcess(train2[,7:59], method = "pca", pcaComp =  26)
+trainPC <- predict(prep, train2[,7:59])
+trainPC$classe <- as.factor(train2$classe)
+```
+
+Finally, we have our tidy data set ready with 26 columns. We have come a long way in reducing the size of the data from 160 columns to 26 columns.
+
+# 6. Selecting the Prediction Model
+Selecting the right prediction model is often very difficult and there is no single answer for that. Often times, the prediction model depends on the dataset and nature of the problem. We can use hit and trial to select between two or more models. This approach, called spot checking, is borrowed from this [website](www.machinelearningmastery.com) by Jason Brownlee. I will be using 4 algorithms to do spot checking. Decision Tree, Logistic Boosting, Logistic Model Tree and Random Forest. All these algorithms are available in the `caret` package.
+
+```{r spot, echo=TRUE, message=FALSE, warning=FALSE, cache = TRUE}
+# Set parameters for bootstrapping 2 samples
+fitcontrol <- trainControl(method ="boot", number = 2, allowParallel = FALSE)
+model.tree <- train(classe ~ ., method = "rpart", data = trainPC, trControl= fitcontrol)
+model.lb <- train(classe ~ ., method = "LogitBoost", data = trainPC, trControl= fitcontrol)
+model.lmt <- train(classe ~ ., method = "LMT", data = trainPC, trControl= fitcontrol)
+model.rf <- train(classe ~ ., method = "rf", data = trainPC, trControl= fitcontrol)
+```
+
+Now that we have fit 4 models, lets see which of these models gives the best accuracy. In R's `caret` package we have a beautiful function called `resamples` which allows us to compare the performance of these spot check models. Below is the code for that. The plotted accuracy is on the out-of-bag sample of the bootstapping experiment.
+
+```{r comp, echo=TRUE, fig.height=8, fig.width=8, cache=TRUE}
+results <- resamples(list(Tree=model.tree, Logit.Boost=model.lb, LMT = model.lmt, RForest = model.rf))
+dotplot(results)
+```
+
+Clearly, Random Forest has the best accuracy score, so will go ahead with it.
+
+# 7. Improving Accuracy of the Model through Parameter Tuning
+As per the `caret` package, the tunable parameter for the Random Forest is `mtry` which is the number of features used to split the tree at every node. We will check the accuracy of our model using 4 different values of `mtry`. The values will be 1, 2, 3 and 4. As we observed in the spot check step, the Random Forest algorithm had the best accuracy at `mtry = 2`, so we want to see how the accuracy views around `mtry = 2`.. Additionally, we will use 10 fold cross validation so that we can estimate of the out of sample error rate.
+
+```{r tune, echo=TRUE, message=FALSE, warning=FALSE, cache=TRUE}
+# Range values for mtry
+set.seed(1)
+library(caret)
+grid <- expand.grid(.mtry=c(1,2,3,4))
+fitcontrol2 <- trainControl(method="cv", number=10, allowParallel = FALSE)
+model.final <- train(classe ~ ., method = "rf", data = trainPC, trControl= fitcontrol2, tuneGrid = grid)
+print(model.final)
+```
+
+That's it, we have the final model ready. The best value for `mtry` is 2. and we have the model saved in `model.final`. The accuracy of the model is  98.4% and the out of sample error rate which we can expect is 1.44%. Below is the beautiful looking heat map of the confusion matrix.
+
+```{r hm, echo=FALSE, fig.height=8, fig.width=8, message=FALSE, warning=FALSE}
+library(reshape2)
+library(ggplot2)
+df <- as.data.frame(round(100*prop.table(model.final$finalModel$confusion[1:5,1:5],1),2))
+df1 <- melt(df, value.name="value")
+names(df1) <- c("predicted","value")
+df1$actual <- rep(c("A","B","C","D","E"),5)
+df1$predicted <- factor(df1$predicted,levels = c("E","D","C","B","A"))
+ggplot(df1,aes(x=actual, y = predicted, fill=value, label = value)) + geom_tile() + geom_text(col = "white") + theme_bw() + ggtitle("Percentage of Classification")
+
+```
+
+Now we can use this final model to predict the labels in the test dataset.
+
+# 8. Next Steps
+In this project we have covered a lot of aspects about building a machine learning model. As next steps, we can further work on improving the accuracy of the model by trying out different values of tuning parameters. Further more, we can explore combining predictions from multiple models and using those predictors to building a new training model. This is called ensembling which I will demonstrate in my future posts.
+I will be happy to answers to any comments, questions and suggestions about this project.
